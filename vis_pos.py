@@ -2,10 +2,7 @@ import torch
 
 import matplotlib.pyplot as plt
 
-
 if __name__ == "__main__":
-    input_size = (224, 224)
-    patch_size = 32
     embed_dim = 512
 
     nrows = 10

@@ -1,19 +1,25 @@
 import torch
 import torch.nn as nn
+from dataclasses import dataclass
 
 
 class Encoder(nn.Module):
     def __init__(self, embed_dim, num_heads, out_dim) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
-        self.mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.mha = nn.MultiheadAttention(
+            embed_dim,
+            num_heads,
+            batch_first=True,
+            dropout=0.5,
+        )
         self.norm2 = nn.LayerNorm(embed_dim)
         self.mlp = nn.Linear(embed_dim, out_dim)
 
-    def forward(self, x):
+    def forward_collect_attn(self, x):
         z = x
         x = self.norm1(x)
-        attn_output, _ = self.mha(x, x, x)
+        attn_output, weights = self.mha(x, x, x)
         x = attn_output
         x = x + z
 
@@ -22,64 +28,77 @@ class Encoder(nn.Module):
         x = self.mlp(x)
         x = x + z
 
+        return x, attn_output, weights
+
+    def forward(self, x):
+        x, _, _ = self.forward_collect_attn(x)
         return x
 
 
+@dataclass
+class ModelConfig:
+    num_classes: int
+    in_channels: int
+    patch_size: int
+    image_size: int
+    embed_dim: int
+    num_heads: int
+    num_layers: int
+
+
 class Model(nn.Module):
-    def __init__(
-        self,
-        num_classes,
-        in_channels,
-        patch_size,
-        image_size,
-        embed_dim,
-        num_heads,
-        num_layers,
-        device="cpu",
-    ):
+    def __init__(self, config: ModelConfig):
         super().__init__()
 
         assert (
-            image_size % patch_size == 0
+            config.image_size % config.patch_size == 0
         ), "image size must be a multiple of the patch size"
 
-        num_patches = (image_size // patch_size) ** 2
+        self.config = config
+
+        num_patches = (config.image_size // config.patch_size) ** 2
 
         self.pos_one_hot = (
             nn.functional.one_hot(torch.arange(0, num_patches + 1).to(dtype=torch.long))
             .unsqueeze(0)
             .float()
-            .to(device)
         )
-        self.pos_linear = nn.Linear(num_patches + 1, embed_dim)
+        self.pos_linear = nn.Linear(num_patches + 1, config.embed_dim)
 
-        self.class_token = torch.ones((1, 1, embed_dim), requires_grad=True).to(device)
-
-        self.embed_dim = embed_dim
+        self.class_token = torch.ones((1, 1, config.embed_dim), requires_grad=True)
 
         self.proj = nn.Conv2d(
-            in_channels,
-            embed_dim,
-            kernel_size=patch_size,
-            stride=patch_size,
+            config.in_channels,
+            config.embed_dim,
+            kernel_size=config.patch_size,
+            stride=config.patch_size,
             padding=0,
         )
 
         self.encoder = nn.Sequential(
-            *[Encoder(embed_dim, num_heads, embed_dim) for _ in range(num_layers)]
+            *[
+                Encoder(config.embed_dim, config.num_heads, config.embed_dim)
+                for _ in range(config.num_layers)
+            ]
         )
 
         self.head = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, num_classes),
+            nn.LayerNorm(config.embed_dim),
+            nn.Linear(config.embed_dim, config.num_classes),
         )
 
-    def forward(self, x):
+    def forward_pre_encoder(self, x):
+        # move extra tensors to the corect device
+        self.class_token = self.class_token.to(x)
+        self.pos_one_hot = self.pos_one_hot.to(x)
+
         # embedding layer
         x = self.proj(x)
 
         # reshape
-        x = x.reshape((x.size()[0], self.embed_dim, -1))  # batch, embed_dim, patch
+        x = x.reshape(
+            (x.size()[0], self.config.embed_dim, -1)
+        )  # batch, embed_dim, patch
         x = x.permute((0, 2, 1))  # batch, patch, embed_dim
 
         # expand the class token to the whole batch
@@ -92,13 +111,29 @@ class Model(nn.Module):
 
         # add the positional embeddings
         x += self.pos_linear(self.pos_one_hot)
+        return x
 
-        # pass through the encoder
-        x = self.encoder(x)
-
+    def forward_post_encoder(self, x):
         # take the first token of the last layer and pass it through the MLP head
         x = x[:, 0, :].squeeze(1)  # batch_size, embed_dim
         x = self.head(x)
+        return x
+
+    def forward_collect_attn(self, x):
+        x = self.forward_pre_encoder(x)
+        attns = []
+        attns_weights = []
+        for layer in self.encoder:
+            x, attn, weights = layer.forward_collect_attn(x)
+            attns.append(attn)
+            attns_weights.append(weights)
+        x = self.forward_post_encoder(x)
+        return x, attns, attns_weights
+
+    def forward(self, x):
+        x = self.forward_pre_encoder(x)
+        x = self.encoder(x)
+        x = self.forward_post_encoder(x)
         return x
 
 
@@ -112,7 +147,16 @@ if __name__ == "__main__":
 
     input_size = (batch_size, channels, image_size, image_size)
 
-    model = Model(num_classes, channels, patch_size, image_size, 512, 8, 8)
+    config = ModelConfig(
+        num_classes=num_classes,
+        in_channels=channels,
+        patch_size=patch_size,
+        image_size=image_size,
+        embed_dim=512,
+        num_heads=8,
+        num_layers=8,
+    )
+    model = Model(config)
 
     x = torch.randn(input_size)
     print("input: ", x.size())

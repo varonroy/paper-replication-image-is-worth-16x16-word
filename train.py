@@ -1,28 +1,35 @@
-from pytorch_lightning.loggers import CSVLogger
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 
 import torchmetrics
 
+from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning import Trainer
+from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning import LightningModule, Trainer
 
-from model import Model
+from model import Model, ModelConfig
 from data import FashionMnistDataModule
+
+import os
 
 
 class ModelModule(LightningModule):
-    def __init__(self, model, num_classes, learning_rate):
+    def __init__(self, model_config, learning_rate):
         super().__init__()
-        # self.save_hyperparameters() # TODO: fix this
+        self.model_config = model_config
 
-        self.model = model.to("cuda")
+        self.save_hyperparameters()
+
+        self.model = Model(model_config)
 
         self.loss_fn = nn.CrossEntropyLoss()
         self.learning_rate = learning_rate
-        self.num_classes = num_classes
         self.acc_metric = torchmetrics.Accuracy(
-            task="multiclass", num_classes=num_classes
+            task="multiclass", num_classes=model_config.num_classes
         )
 
     def forward(self, x):
@@ -37,7 +44,7 @@ class ModelModule(LightningModule):
         out = self.forward(x)
 
         loss = self.loss_fn(
-            out.view(-1, self.num_classes),
+            out.view(-1, self.model_config.num_classes),
             label.view(-1),
         )
         acc = self.acc_metric(out, label).float().mean()
@@ -47,7 +54,8 @@ class ModelModule(LightningModule):
                 {
                     f"{log_mode}-loss": loss.item(),
                     f"{log_mode}-acc": acc.item(),
-                }
+                },
+                sync_dist=True,
             )
 
         return loss
@@ -66,13 +74,18 @@ class ModelModule(LightningModule):
         return [
             {
                 "optimizer": optimizer,
+                "scheduler": ReduceLROnPlateau(optimizer),
             }
         ]
 
 
 if __name__ == "__main__":
-    input_size = (224, 224)
-    patch_size = 32
+    IMAGE_SIZE = 224
+    PATCH_SIZE = 16
+
+    if not os.path.isdir("./out"):
+        print("`./out` dir doesn't exist")
+        exit(-1)
 
     val_fraction = 0.1
 
@@ -80,43 +93,44 @@ if __name__ == "__main__":
     num_heads = 8
     num_layers = 8
 
-    learning_rate = 4e-4
+    learning_rate = 5e-4
 
-    epochs = 5
-    batch_size = 128
-    num_workers = 18
+    epochs = 15
+    batch_size = 256
+    num_workers = 24
 
     # properly utilize tensor cores
     torch.set_float32_matmul_precision("medium")
 
     data = FashionMnistDataModule(
-        resize=input_size,
+        resize=(224, 224),
         val_fraction=val_fraction,
         batch_size=batch_size,
         num_workers=num_workers,
     )
 
-    model = Model(
+    model_config = ModelConfig(
         num_classes=len(data.classes()),
         in_channels=data.num_channels(),
-        patch_size=patch_size,
-        image_size=input_size[0],
+        patch_size=PATCH_SIZE,
+        image_size=IMAGE_SIZE,
         embed_dim=embed_dim,
         num_heads=num_heads,
         num_layers=num_layers,
-        device="cuda",
     )
 
     model = ModelModule(
-        model,
-        num_classes=len(data.classes()),
+        model_config,
         learning_rate=learning_rate,
     )
+
+    lr_monitor = LearningRateMonitor(logging_interval="step")
 
     trainer = Trainer(
         min_epochs=1,
         max_epochs=epochs,
         logger=[CSVLogger("logs")],
+        callbacks=[lr_monitor],
     )
     trainer.fit(model, data)
     trainer.test(model, data)

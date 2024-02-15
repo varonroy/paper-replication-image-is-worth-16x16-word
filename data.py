@@ -1,4 +1,4 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 
 import torch.utils.data
 import torchvision.transforms
@@ -9,9 +9,11 @@ from datasets import DatasetDict, load_dataset
 
 
 class DatasetInfo(ABC):
+    @abstractmethod
     def classes(self):
         raise Exception
 
+    @abstractmethod
     def num_channels(self):
         raise Exception
 

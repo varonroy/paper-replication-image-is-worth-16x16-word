@@ -7,12 +7,13 @@ The goal of this project is not to replicate the paper one to one, but to take i
 The dataset is downloaded from `huggingface` and will be placed under `$HF_HOME/datasets`.
 
 ## Setup
-Create a virtual environment, activate it, and install the dependencies:
-```bash
-$ python -m venv venv
-$ source venv/bin/activate
-$ python -m pip install requiremens.txt
-```
+required pakcages:
+- `pytorch`
+- `pytorch lightning`
+- `matplotlib`
+- `datasets`
+- `torchmetrics`
+- `torchinfo`
 
 ## Run
 Show some samples from the dataset:
@@ -37,5 +38,5 @@ $ python vis_pos.py
 ```
 Visualize the activation maps
 ```
-TODO
+$ python vis_attention.py
 ```
